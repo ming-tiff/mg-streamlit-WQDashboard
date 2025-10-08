@@ -28,18 +28,35 @@ if uploaded_file is not None:
     df.columns = df.columns.str.strip().str.lower()
     
     # Convert date
-    date_cols = [c for c in df.columns if 'date' in c]
+    date_cols = [col for col in df.columns if 'date' in col.lower()]
+
     if date_cols:
-        df[date_cols[0]] = pd.to_datetime(df[date_cols[0]], errors='coerce')
-        df = df.dropna(subset=[date_cols[0]])
+        date_min, date_max = df[date_cols[0]].min(), df[date_cols[0]].max()
+        date_range = st.sidebar.date_input("Date range:", [date_min, date_max])
+
+        if len(date_range) == 2:
+            df = df[
+                (df[date_cols[0]] >= pd.to_datetime(date_range[0])) &
+                (df[date_cols[0]] <= pd.to_datetime(date_range[1]))
+            ]
+    else:
+        st.warning("⚠️ No date column found in your dataset. Skipping date filtering.")
+        st.success(f"✅ Data loaded successfully — {len(df)} records found.")
+
+
+    #####
+   # date_cols = [c for c in df.columns if 'date' in c]
+   # if date_cols:
+       # df[date_cols[0]] = pd.to_datetime(df[date_cols[0]], errors='coerce')
+       # df = df.dropna(subset=[date_cols[0]])
 
     # Identify numeric columns (parameters)
-    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
-    location_col = [c for c in df.columns if 'location' in c]
-    lat_col = [c for c in df.columns if 'lat' in c]
-    lon_col = [c for c in df.columns if 'lon' in c]
+    #numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
+   # location_col = [c for c in df.columns if 'location' in c]
+   # lat_col = [c for c in df.columns if 'lat' in c]
+   # lon_col = [c for c in df.columns if 'lon' in c]
 
-    st.success(f"✅ Data loaded successfully — {len(df)} records found.")
+    #st.success(f"✅ Data loaded successfully — {len(df)} records found.")
 
     # ------------------------------------------------------------
     # 3. SIDEBAR FILTERS
