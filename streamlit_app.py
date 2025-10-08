@@ -5,20 +5,19 @@ import requests
 import plotly.express as px
 from datetime import datetime
 
-# ========== CONFIG / THRESHOLDS ==========
+# =======================================
+# CONFIG / THRESHOLDS
+# =======================================
 
-# Malaysia DOE parameter thresholds by water quality class (Class I to V) — example subset
 DOE_THRESHOLDS = {
-    'bod': [1, 3, 6, 12],  # mg/L: boundaries for classes I–V
+    'bod': [1, 3, 6, 12],
     'cod': [10, 25, 50, 100],
     'do': [7, 5, 3, 1],
-    'ph': [6.5, 8.5],  # for “normal” range
+    'ph': [6.5, 8.5],
     'tss': [25, 50, 150, 300],
     'nh3_n': [0.1, 0.3, 0.9, 2.7],
-    # etc. add more
 }
 
-# Weights & formula for Malaysia DOE WQI (six parameters) — you may adjust based on literature
 WQI_WEIGHTS = {
     'bod': 0.16,
     'cod': 0.11,
@@ -26,76 +25,73 @@ WQI_WEIGHTS = {
     'nh3_n': 0.10,
     'tss': 0.10,
     'ph': 0.033,
-    # sum of weights should be 1 (or normalized)
 }
 
-# ========== FUNCTIONS ==========
+# =======================================
+# GLOBAL WATER QUALITY API SOURCES
+# =======================================
+
+WQ_APIS = {
+    "Global - UNEP GEMS/Water": "https://gemstat.org/api/data",
+    "USA - USGS Water Quality Portal": "https://www.waterqualitydata.us/data/Result/search?countrycode=US&mimeType=json",
+    "Global - Copernicus Water Quality": "https://cds.climate.copernicus.eu/api/v2/",
+    "Malaysia - DOE (manual)": "https://enviro.doe.gov.my/",
+    "Malaysia - DID Public Info Banjir": "https://publicinfobanjir.water.gov.my/api/v1/locations",
+    "Singapore - PUB Water Quality (demo)": "https://data.gov.sg/api/action/datastore_search?resource_id=2b03c745-57e8-4a96-9a8c-4a2577ad1fdd"
+}
+
+# =======================================
+# FUNCTIONS
+# =======================================
 
 def fetch_api_data(base_url: str, params: dict = None) -> pd.DataFrame:
-    """Fetch JSON or CSV data from an API. Return DataFrame or None if fail."""
+    """Fetch JSON or CSV data from API and return DataFrame."""
     try:
         resp = requests.get(base_url, params=params, timeout=10)
         resp.raise_for_status()
-        # Try JSON
         if 'application/json' in resp.headers.get('Content-Type', ''):
-            j = resp.json()
-            # Assumes the JSON is list-of-dict or has “data” key
-            if isinstance(j, dict) and 'data' in j:
-                data = j['data']
-            else:
-                data = j
-            return pd.DataFrame(data)
-        # Fallback: CSV
+            data = resp.json()
+            if isinstance(data, dict):
+                data = data.get('data') or data.get('result') or data
+            if isinstance(data, list):
+                return pd.DataFrame(data)
+            elif isinstance(data, dict):
+                # Flatten nested dict if possible
+                return pd.json_normalize(data)
         else:
-            return pd.read_csv(pd.compat.StringIO(resp.text))
+            from io import StringIO
+            return pd.read_csv(StringIO(resp.text))
     except Exception as e:
-        st.warning(f"API fetch error: {e}")
+        st.warning(f"⚠️ API fetch error: {e}")
         return None
 
+
 def compute_subindex(param: str, value: float) -> float:
-    """
-    Convert a parameter reading to a sub-index score (0–100) based on threshold curves.
-    This is a simplified approach — real DOE WQI uses curves / rating functions.
-    """
-    # Example: if parameter is “bod”, lower is better, so invert mapping
-    # This simple linear mapping is just illustrative
     thr = DOE_THRESHOLDS.get(param)
     if thr is None or pd.isna(value):
         return np.nan
-    # For “good” side
-    if param in ['do']:  # larger is better
-        # if value >= thr[0] => best (assign 100)
-        # else linear down to 0 (when value = 0)
+    if param in ['do']:
         return max(0, min(100, (value / thr[0]) * 100))
     else:
-        # lower is better (for contaminants)
-        # if ≤ first threshold => 100,
-        # if ≥ last threshold => 0, else linear interpolation
         for i, bound in enumerate(thr):
             if value <= bound:
-                # map between previous bound and this
                 prev = thr[i-1] if i > 0 else 0
-                # linear interpolation
                 return 100 * (1 - (value - prev) / (bound - prev)) if bound != prev else 100
         return 0
 
+
 def compute_wqi(df: pd.DataFrame) -> pd.Series:
-    """Compute DOE WQI for rows in DataFrame (expects columns matching WQI_WEIGHTS keys)."""
     sub_indices = {}
     for p in WQI_WEIGHTS:
         if p in df.columns:
             sub_indices[p] = df[p].apply(lambda v: compute_subindex(p, v))
         else:
             sub_indices[p] = pd.Series([np.nan] * len(df))
-    # Weighted sum
     wqi = sum(WQI_WEIGHTS[p] * sub_indices[p].fillna(0) for p in WQI_WEIGHTS)
-    # Optionally normalize so that max possible = 100
-    # sum_weights = sum(WQI_WEIGHTS.values())
-    # wqi = wqi / sum_weights
     return wqi
 
+
 def classify_wqi(wqi: float) -> str:
-    """Classify WQI into categories (Excellent, Good, etc) — example thresholds."""
     if wqi >= 92.7:
         return "Excellent"
     elif wqi >= 76.5:
@@ -107,13 +103,12 @@ def classify_wqi(wqi: float) -> str:
     else:
         return "Very Poor"
 
+
 def flag_threshold(param: str, value: float) -> str:
-    """Return color / label depending on whether the reading is acceptable or exceeds limits."""
     thr = DOE_THRESHOLDS.get(param)
     if thr is None or pd.isna(value):
         return "gray"
     if param in ['do']:
-        # do below second bound => warning
         if value < thr[1]:
             return "red"
         elif value < thr[0]:
@@ -121,7 +116,6 @@ def flag_threshold(param: str, value: float) -> str:
         else:
             return "green"
     else:
-        # for contaminants (lower is better)
         if value > thr[-1]:
             return "red"
         elif value > thr[-2]:
@@ -129,145 +123,136 @@ def flag_threshold(param: str, value: float) -> str:
         else:
             return "green"
 
+# =======================================
+# STREAMLIT APP
+# =======================================
 
-# ========== MAIN STREAMLIT APP ==========
+st.set_page_config(page_title="💧 Water Quality Dashboard", layout="wide")
+st.title("💧 Water Quality Dashboard (CSV + API sources)")
 
-st.set_page_config(page_title="Water Quality Dashboard with APIs", layout="wide")
-st.title("💧 Water Quality Dashboard (with API support)")
-
-# ========== Data Source Section ==========
-
-st.sidebar.header("Data Source (choose one)")
-
-source_option = st.sidebar.selectbox(
-    "How to load data:",
-    ["Upload CSV", "Use API URL"]
-)
+# Sidebar: Data Source
+st.sidebar.header("📦 Data Source")
+source_option = st.sidebar.radio("Choose data source:", ["Upload CSV", "Use Built-in API"])
 
 df = None
+
 if source_option == "Upload CSV":
-    uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+    uploaded = st.sidebar.file_uploader("Upload your CSV file", type=["csv"])
     if uploaded:
         df = pd.read_csv(uploaded)
-elif source_option == "Use API URL":
-    api_url = st.sidebar.text_input("API URL (GET endpoint)")
-    api_params_text = st.sidebar.text_area("Query params (JSON)", value="{}")
-    try:
-        api_params = eval(api_params_text)
-    except:
-        api_params = {}
-    if api_url:
-        df = fetch_api_data(api_url, api_params)
 
-if df is None:
-    st.info("Please upload CSV or enter API URL to fetch data.")
+elif source_option == "Use Built-in API":
+    api_choice = st.sidebar.selectbox("Select API source", list(WQ_APIS.keys()))
+    st.sidebar.markdown(f"**API URL:** `{WQ_APIS[api_choice]}`")
+    if st.sidebar.button("Fetch Data"):
+        df = fetch_api_data(WQ_APIS[api_choice])
+
+# Stop if no data
+if df is None or df.empty:
+    st.info("Please upload a CSV or fetch from API to continue.")
     st.stop()
 
 # Normalize columns
 df.columns = df.columns.str.strip().str.lower()
 
-# Detect date column
+# Detect date
 date_cols = [c for c in df.columns if 'date' in c]
 if not date_cols:
-    st.error("No date column detected. Please have a column with ‘date’ in its name.")
-    st.stop()
-date_col = date_cols[0]
-df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-df = df.dropna(subset=[date_col])
+    st.warning("⚠️ No date column detected — using index as date.")
+    df['date'] = pd.date_range(start='2020-01-01', periods=len(df))
+    date_col = 'date'
+else:
+    date_col = date_cols[0]
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
 
-# Identify location / lat / lon
+# Detect key columns
 loc_col = next((c for c in df.columns if 'location' in c), None)
 lat_col = next((c for c in df.columns if 'lat' in c), None)
 lon_col = next((c for c in df.columns if 'lon' in c), None)
 
-# Numeric / parameter columns
 numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
 
-# ========== Filters ==========
-
-st.sidebar.header("Filters")
+# Filters
+st.sidebar.header("🔍 Filters")
 if loc_col:
-    selected_locs = st.sidebar.multiselect("Locations", sorted(df[loc_col].unique()), default=None)
+    selected_locs = st.sidebar.multiselect("Filter by location", df[loc_col].unique())
     if selected_locs:
         df = df[df[loc_col].isin(selected_locs)]
 
-# Date range
-dmin, dmax = df[date_col].min(), df[date_col].max()
-start_date, end_date = st.sidebar.date_input("Date range", [dmin, dmax])
-if start_date and end_date:
-    df = df[(df[date_col] >= pd.to_datetime(start_date)) & (df[date_col] <= pd.to_datetime(end_date))]
+# Date range filter
+if date_col in df.columns:
+    dmin, dmax = df[date_col].min(), df[date_col].max()
+    start_date, end_date = st.sidebar.date_input("Date range", [dmin, dmax])
+    if start_date and end_date:
+        df = df[(df[date_col] >= pd.to_datetime(start_date)) & (df[date_col] <= pd.to_datetime(end_date))]
 
 # Parameter pick
 param = st.sidebar.selectbox("Parameter to visualize", numeric_cols)
 
-# ========== Compute WQI + Classify ==========
-
-# Compute WQI for each row (if parameters exist)
+# Compute WQI
 df['wqi'] = compute_wqi(df)
 df['wqi_class'] = df['wqi'].apply(classify_wqi)
 
-# ========== Map View ==========
-
+# ==========================
+# MAP VIEW
+# ==========================
 if lat_col and lon_col:
-    st.subheader("🗺️ Mean parameter by location")
+    st.subheader("🗺️ Mean Parameter by Location")
     df_mean = df.groupby(loc_col, as_index=False)[param].mean()
-    # attach lat/lon
     df_coords = df[[loc_col, lat_col, lon_col]].drop_duplicates()
     df_mean = df_mean.merge(df_coords, on=loc_col, how='left')
     fig_map = px.scatter_mapbox(
-        df_mean, lat=lat_col, lon=lon_col,
-        color=param, size=param,
-        hover_name=loc_col, color_continuous_scale='Viridis',
-        zoom=6, height=500
+        df_mean, lat=lat_col, lon=lon_col, color=param, size=param,
+        hover_name=loc_col, color_continuous_scale='Viridis', zoom=6, height=450
     )
-    fig_map.update_layout(mapbox_style='open-street-map', margin=dict(l=0,r=0,t=0,b=0))
+    fig_map.update_layout(mapbox_style="open-street-map", margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig_map, use_container_width=True)
 
-# ========== Time Series + Highlighting ==========
-
-st.subheader(f"📈 Time series: {param.upper()} by location")
-
-# Add flag color
+# ==========================
+# TIME SERIES
+# ==========================
+st.subheader(f"📈 {param.upper()} Time Series")
 df['flag_color'] = df[param].apply(lambda v: flag_threshold(param, v))
 
-fig = px.scatter(
-    df, x=date_col, y=param, color=loc_col if loc_col else None,
-    size_max=6, hover_data=numeric_cols
-)
-# Overlay lines
-for loc in df[loc_col].unique() if loc_col else [None]:
-    dloc = df[df[loc_col] == loc] if loc_col else df
-    fig.add_scatter(x=dloc[date_col], y=dloc[param], mode='lines', name=f"{loc} trend")
+fig_ts = px.scatter(df, x=date_col, y=param, color=loc_col if loc_col else None, hover_data=numeric_cols)
+if loc_col:
+    for loc in df[loc_col].unique():
+        dloc = df[df[loc_col] == loc]
+        fig_ts.add_scatter(x=dloc[date_col], y=dloc[param], mode='lines', name=f"{loc} trend")
 
-# Optionally add threshold lines
-# E.g. for contaminant, add line at the class III boundary
 if param in DOE_THRESHOLDS and param not in ['do']:
-    bound = DOE_THRESHOLDS[param][2]  # e.g. class III
-    fig.add_hline(y=bound, line_dash="dash", line_color="red", annotation_text="Class III boundary")
+    fig_ts.add_hline(y=DOE_THRESHOLDS[param][2], line_dash="dash", line_color="red", annotation_text="Class III boundary")
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig_ts, use_container_width=True)
 
-# ========== Summary Stats & WQI Plot ==========
-
+# ==========================
+# SUMMARY & WQI
+# ==========================
 st.subheader("📊 Summary & WQI")
 
-# Stats
-stats = df.groupby(loc_col if loc_col else None)[param].agg(['mean','min','max','std','count']).reset_index()
+# FIXED GROUPBY (no None issue)
+if loc_col:
+    stats = df.groupby(loc_col)[param].agg(['mean','min','max','std','count']).reset_index()
+else:
+    stats = df[param].agg(['mean','min','max','std','count']).to_frame().T.reset_index(drop=True)
+
 st.dataframe(stats, use_container_width=True)
 
-# WQI over time
-fig2 = px.line(df, x=date_col, y='wqi', color=loc_col if loc_col else None, title="WQI over time")
-st.plotly_chart(fig2, use_container_width=True)
+fig_wqi = px.line(df, x=date_col, y='wqi', color=loc_col if loc_col else None, title="WQI Over Time")
+st.plotly_chart(fig_wqi, use_container_width=True)
 
-# Show sample table with classification
-st.subheader("Sample readings with classification")
+st.subheader("💦 Sample Readings & Classification")
 show_cols = [date_col] + ([loc_col] if loc_col else []) + [param, 'wqi', 'wqi_class']
 st.dataframe(df[show_cols].sort_values(by=date_col).reset_index(drop=True), use_container_width=True)
 
-# ========== Data Download ==========
-
-st.sidebar.markdown("### 💾 Download Data")
+# ==========================
+# DOWNLOAD
+# ==========================
+st.sidebar.markdown("### 💾 Download Filtered Data")
 csv_bytes = df.to_csv(index=False).encode('utf-8')
-st.sidebar.download_button("Download filtered data as CSV", data=csv_bytes,
-                            file_name=f"water_quality_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                            mime='text/csv')
+st.sidebar.download_button(
+    "Download CSV",
+    data=csv_bytes,
+    file_name=f"water_quality_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+    mime='text/csv'
+)
